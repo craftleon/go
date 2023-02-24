@@ -5,8 +5,6 @@ import (
 	"net"
 	"os"
 	"os/signal"
-	"strconv"
-	"sync"
 	"syscall"
 	"time"
 )
@@ -48,92 +46,72 @@ func (c *Client) Run() {
 		conn.Close()
 	}()
 
-	var index, currSendIndex uint64
+	var index uint64
 	var currSendTime, currRecvTime int64
 	remoteAddr := &net.UDPAddr{
 		IP:   c.DestIp,
 		Port: c.DestPort,
 	}
 
-	sendMsg := func() {
-		err = conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
-		if err != nil {
-			PrintT("Send error: %v\n", err)
-			return
-		}
-
+	sendMsg := func() error {
 		msg := fmt.Sprintf("%s%d", MagicHeader, index)
 		_, err := conn.WriteToUDP([]byte(msg), remoteAddr)
 		if err != nil {
 			PrintT("Send msg [%d] to addr: %s error: %v\n", index, remoteAddr.String(), err)
-			return
+			return err
 		}
 
 		currSendTime = time.Now().UnixNano()
-		currSendIndex = index
 		PrintT("Send msg [%d] to addr: %s\n", index, remoteAddr.String())
 		index++
+		return nil
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-
-	// receive routine
-	go func() {
-		defer wg.Done()
-
-		for {
-			select {
-			case <-stop:
-				return
-			default:
-			}
-
-			var buf [256]byte
-			/*
-				err = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-				if err != nil {
-					PrintT("Read error: %v\n", err)
-					continue
-				}
-			*/
-
-			n, remoteAddr, err := conn.ReadFromUDP(buf[:])
-			if err != nil {
-				PrintT("Read from UDP error: %v\n", err)
-				continue
-			}
-			if n < HeaderLen || string(buf[:HeaderLen]) != MagicHeader {
-				PrintT("UDP message format error\n")
-				continue
-			}
-
-			var durationMs float64
-			var durationStr string
-			currRecvTime = time.Now().UnixNano()
-			msg := string(buf[HeaderLen:n])
-			recvIndex, err := strconv.ParseUint(msg, 10, 64)
-			if err == nil {
-				if recvIndex == currSendIndex {
-					durationMs = float64(currRecvTime-currSendTime) / float64(time.Millisecond)
-				}
-			}
-			if durationMs > 0.0 {
-				durationStr = fmt.Sprintf("%.3fms", durationMs)
-			} else {
-				durationStr = "-"
-			}
-			PrintT("Received echo [%s] from addr: %s, interval: %s\n", msg, remoteAddr.String(), durationStr)
+	recvEcho := func() error {
+		var buf [256]byte
+		n, remoteAddr, err := conn.ReadFromUDP(buf[:])
+		if err != nil {
+			PrintT("Read from UDP error: %v\n", err)
+			return nil
 		}
-	}()
+		if n < HeaderLen || string(buf[:HeaderLen]) != MagicHeader {
+			PrintT("UDP message format error\n")
+			return nil
+		}
+
+		var durationMs float64
+		var durationStr string
+		currRecvTime = time.Now().UnixNano()
+		msg := string(buf[HeaderLen:n])
+
+		durationMs = float64(currRecvTime-currSendTime) / float64(time.Millisecond)
+		if durationMs > 0.0 {
+			durationStr = fmt.Sprintf("%.3fms", durationMs)
+		} else {
+			durationStr = "-"
+		}
+		PrintT("Received echo [%s] from addr: %s, interval: %s\n", msg, remoteAddr.String(), durationStr)
+
+		return nil
+	}
 
 	for {
-		sendMsg()
+		startTime := time.Now()
+		err = conn.SetDeadline(startTime.Add(2500 * time.Millisecond))
+		if err != nil {
+			PrintT("Set conn error: %v\n", err)
+			goto end
+		}
+		err = sendMsg()
+		if err == nil {
+			recvEcho()
+		}
 
+	end:
+		endTime := time.Now()
 		select {
-		case <-time.After(3 * time.Second):
+		case <-time.After(3*time.Second - endTime.Sub(startTime)):
 		case <-stop:
-			wg.Wait()
 			PrintT("Program exited.\n")
 			return
 		}
