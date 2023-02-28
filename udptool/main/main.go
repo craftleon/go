@@ -22,6 +22,7 @@ func main() {
 	var mode Mode
 	var ip net.IP
 	var port int
+	var dataSize int
 	var err error
 
 	flag.Usage = func() {
@@ -30,6 +31,7 @@ func main() {
 		fmt.Printf("\t-p server mode:   Specify port_number for listening.\n")
 		fmt.Printf("\t-s server mode:   Specify ip_address:port_number for listening.\n")
 		fmt.Printf("\t-c client mode:   Specify ip_address:port_number for connecting.\n")
+		fmt.Printf("\t-n client mode:   Specify data size to send in one packet.\n")
 		fmt.Printf("\t(ip_address must be legal IPv4 address.)\n")
 		fmt.Printf("\t(port_number must have the range between 1 and 65535.)\n")
 		fmt.Printf("\n")
@@ -38,6 +40,7 @@ func main() {
 	flag.StringVar(&inputP, "p", "", "Hosting port for server mode")
 	flag.StringVar(&inputS, "s", "", "Hosting address for server mode")
 	flag.StringVar(&inputC, "c", "", "Connecting address for client mode")
+	flag.IntVar(&dataSize, "n", 0, "Additional data packet size for client mode, max 4000")
 	flag.Parse()
 
 	if len(inputP) > 0 {
@@ -54,6 +57,11 @@ func main() {
 		if len(inputC) > 0 {
 			mode = ClientMode
 			input = inputC
+			if dataSize < 0 {
+				dataSize = 0
+			} else if dataSize > 4000 {
+				dataSize = 4000
+			}
 		} else {
 			mode = ServerMode
 			input = inputS
@@ -99,6 +107,7 @@ func main() {
 		client := &utils.Client{
 			DestIp:   ip,
 			DestPort: port,
+			DataSize: dataSize,
 		}
 		client.Run()
 	}

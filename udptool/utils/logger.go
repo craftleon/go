@@ -15,7 +15,7 @@ const (
 type LogWriter struct {
 	Prefix string
 	Name   string
-	msg    chan string
+	msg    chan []byte
 	wg     sync.WaitGroup
 }
 
@@ -26,11 +26,11 @@ func (l *LogWriter) Write(data []byte) (n int, err error) {
 	}
 
 	if l.msg == nil {
-		l.msg = make(chan string, LogQueueSize)
+		l.msg = make(chan []byte, LogQueueSize)
 		l.wg.Add(1)
 		go l.writeRoutine()
 	}
-	l.msg <- string(data)
+	l.msg <- data
 
 	return len(data), nil
 }
@@ -39,11 +39,11 @@ func (l *LogWriter) writeRoutine() {
 	defer l.wg.Done()
 
 	for {
-		var msgArr []string
+		var msgArr [][]byte
 		var quit bool
 
 		msg := <-l.msg
-		if msg == "quit" {
+		if msg == nil {
 			quit = true
 		} else {
 			msgArr = append(msgArr, msg)
@@ -53,7 +53,7 @@ func (l *LogWriter) writeRoutine() {
 		for {
 			select {
 			case msg = <-l.msg:
-				if msg == "quit" {
+				if msg == nil {
 					quit = true
 				} else {
 					msgArr = append(msgArr, msg)
@@ -81,7 +81,7 @@ func (l *LogWriter) writeRoutine() {
 			}
 
 			for _, m := range msgArr {
-				_, err := file.Write([]byte(m))
+				_, err := file.Write(m)
 				if err != nil {
 					PrintTee(nil, "Log file write failed: %v", err)
 					break
@@ -103,6 +103,6 @@ func (l *LogWriter) Close() {
 	if l.msg == nil {
 		return
 	}
-	l.msg <- "quit"
+	l.msg <- nil
 	l.wg.Wait()
 }

@@ -24,7 +24,7 @@ type Server struct {
 type Peer struct {
 	Remote           *net.UDPAddr
 	Logger           *LogWriter
-	Msg              chan string
+	Msg              chan *Message
 	LastReceivedTime int64
 }
 
@@ -71,22 +71,20 @@ func (s *Server) Run() {
 		conn.Close()
 	}()
 
-	echoReply := func(peer *Peer, msg string) {
+	echoReply := func(peer *Peer, msg *Message) {
 		err := conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
 			PrintTee(peer.Logger, "Send error: %v\n", err)
 			return
 		}
 
-		cs := StringChecksum(msg)
-		sendMsg := fmt.Sprintf("%s%s", cs, msg)
-		_, err = conn.WriteToUDP([]byte(sendMsg), peer.Remote)
+		_, err = conn.WriteToUDP(msg.Packet, peer.Remote)
 		if err != nil {
-			PrintTee(peer.Logger, "Send echo [%s] to addr: %s error: %v\n", msg, peer.Remote.String(), err)
+			PrintTee(peer.Logger, "Send echo [%d] to addr: %s error: %v\n", msg.Header.Index, peer.Remote.String(), err)
 			return
 		}
 
-		PrintTee(peer.Logger, "Send echo [%s] to addr: %s\n", msg, peer.Remote.String())
+		PrintTee(peer.Logger, "Send echo [%d] len [%d] to addr: %s\n", msg.Header.Index, len(msg.Packet), peer.Remote.String())
 	}
 
 	pruneConnection := func(now int64) bool {
@@ -107,7 +105,7 @@ func (s *Server) Run() {
 
 		if now-oldest > int64(300*time.Second) {
 			delete(connMap, delAddr)
-			delPeer.Msg <- "quit"
+			delPeer.Msg <- nil
 			PrintTee(logger, "Reached maximum connection. Remove outdated connection from addr: %s\n", delAddr)
 			return true
 		}
@@ -122,7 +120,7 @@ func (s *Server) Run() {
 		case <-stop:
 			for addr, peer := range connMap {
 				delete(connMap, addr)
-				peer.Msg <- "quit"
+				peer.Msg <- nil
 			}
 			wg.Wait()
 			PrintTee(logger, "Program exited\n")
@@ -130,7 +128,7 @@ func (s *Server) Run() {
 		default:
 		}
 
-		var buf [256]byte
+		var buf [MaxPacketSize]byte
 		/*
 			err = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			if err != nil {
@@ -149,14 +147,19 @@ func (s *Server) Run() {
 			continue
 		}
 
-		msg := string(buf[HeaderLen:n])
-		cs := StringChecksum(msg)
-		if string(buf[:HeaderLen]) != cs {
-			PrintTee(logger, "UDP message checksum error\n")
-			continue
+		packet := buf[:n]
+		header, err := CheckPacket(packet)
+		if err != nil {
+			PrintTee(logger, "UDP data packet error: %v\n", err)
+			return
 		}
 
 		recvTime := time.Now().UnixNano()
+		msg := &Message{
+			Header: header,
+			Packet: packet,
+		}
+
 		peer, ok := connMap[remoteAddr.String()]
 		if ok {
 			// existing connection
@@ -165,7 +168,7 @@ func (s *Server) Run() {
 		} else {
 			// new connection
 			if !pruneConnection(recvTime) {
-				PrintTee(logger, "Reached maximum connection. Discard new msg [%s] from addr: %s\n", msg, remoteAddr.String())
+				PrintTee(logger, "Reached maximum connection. Discard new msg [%d] from addr: %s\n", msg.Header.Index, remoteAddr.String())
 				continue
 			}
 
@@ -176,7 +179,7 @@ func (s *Server) Run() {
 					Prefix: "peer/",
 					Name:   fmt.Sprintf("peer-%s_%d", remoteAddr.IP.String(), remoteAddr.Port),
 				},
-				Msg:              make(chan string, MsgQueueSize),
+				Msg:              make(chan *Message, MsgQueueSize),
 				LastReceivedTime: recvTime,
 			}
 			connMap[remoteAddr.String()] = peer
@@ -194,11 +197,11 @@ func (s *Server) Run() {
 						PrintTee(peer.Logger, "Idle timeout. Stop echo routine for addr: %s\n", peer.Remote.String())
 						return
 					case msg := <-peer.Msg:
-						PrintTee(peer.Logger, "Received msg [%s] from addr: %s\n", msg, peer.Remote.String())
-						if msg == "quit" {
+						if msg == nil {
 							PrintTee(peer.Logger, "Stop echo routine for addr: %s\n", peer.Remote.String())
 							return
 						}
+						PrintTee(peer.Logger, "Received msg [%d] len [%d] from addr: %s\n", msg.Header.Index, len(msg.Packet), peer.Remote.String())
 						echoReply(peer, msg)
 					}
 				}

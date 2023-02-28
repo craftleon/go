@@ -12,6 +12,7 @@ import (
 type Client struct {
 	DestIp   net.IP
 	DestPort int
+	DataSize int
 }
 
 func (c *Client) Run() {
@@ -59,53 +60,48 @@ func (c *Client) Run() {
 	}
 
 	sendMsg := func() error {
-		indexStr := fmt.Sprintf("%d", index)
-		cs := StringChecksum(indexStr)
-		msg := fmt.Sprintf("%s%s", cs, indexStr)
-		_, err := conn.WriteToUDP([]byte(msg), remoteAddr)
+		packet := MakePacket(index, uint16(c.DataSize))
+		_, err := conn.WriteToUDP(packet, remoteAddr)
 		if err != nil {
 			PrintTee(logger, "Send msg [%d] to addr: %s error: %v\n", index, remoteAddr.String(), err)
 			return err
 		}
 
 		currSendTime = time.Now().UnixNano()
-		PrintTee(logger, "Send msg [%d] to addr: %s\n", index, remoteAddr.String())
+		PrintTee(logger, "Send msg [%d] len [%d] to addr: %s\n", index, len(packet), remoteAddr.String())
 		index++
 		return nil
 	}
 
-	recvEcho := func() error {
-		var buf [256]byte
+	recvEcho := func() {
+		var buf [MaxPacketSize]byte
 		n, remoteAddr, err := conn.ReadFromUDP(buf[:])
 		if err != nil {
 			PrintTee(logger, "Read from UDP error: %v\n", err)
-			return nil
+			return
 		}
 
 		if n < HeaderLen {
 			PrintTee(logger, "UDP message format error\n")
-			return nil
+			return
 		}
-
-		msg := string(buf[HeaderLen:n])
-		cs := StringChecksum(msg)
-		if string(buf[:HeaderLen]) != cs {
-			PrintTee(logger, "UDP message checksum error\n")
-			return nil
+		packet := buf[:n]
+		header, err := CheckPacket(packet)
+		if err != nil {
+			PrintTee(logger, "UDP data packet error: %v\n", err)
+			return
 		}
 
 		var durationMs float64
 		var durationStr string
 		currRecvTime = time.Now().UnixNano()
 		durationMs = float64(currRecvTime-currSendTime) / float64(time.Millisecond)
-		if durationMs > 0.0 {
+		if durationMs >= 0.0 {
 			durationStr = fmt.Sprintf("%.3fms", durationMs)
 		} else {
 			durationStr = "-"
 		}
-		PrintTee(logger, "Received echo [%s] from addr: %s, interval: %s\n", msg, remoteAddr.String(), durationStr)
-
-		return nil
+		PrintTee(logger, "Received echo [%d] len [%d] from addr: %s, interval: %s\n", header.Index, n, remoteAddr.String(), durationStr)
 	}
 
 	for {
