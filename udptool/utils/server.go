@@ -21,6 +21,12 @@ type Server struct {
 	BindPort int
 }
 
+type Message struct {
+	Header *PacketHeader
+	Buffer *[MaxBufferSize]byte
+	Packet []byte
+}
+
 type Peer struct {
 	Remote           *net.UDPAddr
 	Logger           *LogWriter
@@ -38,8 +44,8 @@ func (s *Server) Run() {
 		return
 	}
 
-	// map only used with in the main thread, so don't need sync
 	connMap := make(map[string]*Peer)
+	var connMapMutex sync.Mutex
 
 	// retrieve port
 	laddr := conn.LocalAddr()
@@ -65,13 +71,16 @@ func (s *Server) Run() {
 	signal.Notify(term, syscall.SIGTERM)
 	signal.Notify(term, os.Interrupt)
 
+	var packetBuffers PacketBufferPool
+	packetBuffers.Init(MaxConnection + MaxConnection/2) // 150% max connection
+
 	go func() {
 		<-term
 		close(stop)
 		conn.Close()
 	}()
 
-	echoReply := func(peer *Peer, msg *Message) {
+	sendReply := func(peer *Peer, msg *Message) {
 		err := conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
 			PrintTee(peer.Logger, "Send error: %v\n", err)
@@ -88,6 +97,9 @@ func (s *Server) Run() {
 	}
 
 	pruneConnection := func(now int64) bool {
+		connMapMutex.Lock()
+		defer connMapMutex.Unlock()
+
 		if len(connMap) < MaxConnection {
 			return true
 		}
@@ -115,20 +127,24 @@ func (s *Server) Run() {
 
 	// transmission start
 	var wg sync.WaitGroup
+
 	for {
 		select {
 		case <-stop:
+			connMapMutex.Lock()
 			for addr, peer := range connMap {
 				delete(connMap, addr)
 				peer.Msg <- nil
 			}
+			connMapMutex.Unlock()
 			wg.Wait()
 			PrintTee(logger, "Program exited\n")
 			return
 		default:
 		}
 
-		var buf [MaxPacketSize]byte
+		// allocate a new packet buffer for every read
+		buf := packetBuffers.Get()
 		/*
 			err = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 			if err != nil {
@@ -139,10 +155,12 @@ func (s *Server) Run() {
 
 		n, remoteAddr, err := conn.ReadFromUDP(buf[:])
 		if err != nil {
+			packetBuffers.Put(buf)
 			PrintTee(logger, "Read from UDP error: %v\n", err)
 			continue
 		}
 		if n < HeaderLen {
+			packetBuffers.Put(buf)
 			PrintTee(logger, "UDP message format error\n")
 			continue
 		}
@@ -150,24 +168,30 @@ func (s *Server) Run() {
 		packet := buf[:n]
 		header, err := CheckPacket(packet)
 		if err != nil {
+			packetBuffers.Put(buf)
 			PrintTee(logger, "UDP data packet error: %v\n", err)
-			return
+			continue
 		}
 
 		recvTime := time.Now().UnixNano()
 		msg := &Message{
 			Header: header,
+			Buffer: buf,
 			Packet: packet,
 		}
 
+		connMapMutex.Lock()
 		peer, ok := connMap[remoteAddr.String()]
+		connMapMutex.Unlock()
+
 		if ok {
 			// existing connection
 			peer.LastReceivedTime = recvTime
 			peer.Msg <- msg
 		} else {
-			// new connection
+			// clean old connection and create new connection
 			if !pruneConnection(recvTime) {
+				packetBuffers.Put(buf)
 				PrintTee(logger, "Reached maximum connection. Discard new msg [%d] from addr: %s\n", msg.Header.Index, remoteAddr.String())
 				continue
 			}
@@ -182,18 +206,30 @@ func (s *Server) Run() {
 				Msg:              make(chan *Message, MsgQueueSize),
 				LastReceivedTime: recvTime,
 			}
+			connMapMutex.Lock()
 			connMap[remoteAddr.String()] = peer
+			connMapMutex.Unlock()
+			peer.Msg <- msg
+
 			PrintTee(logger, "Setup new connection from addr: %s\n", remoteAddr.String())
 
+			// peer echo routine
 			wg.Add(1)
 			go func(peer *Peer) {
 				defer wg.Done()
 				defer peer.Logger.Close()
 				defer close(peer.Msg)
 
+				PrintTee(peer.Logger, "New peer created for connection from addr: %s\n", peer.Remote.String())
+
 				for {
 					select {
 					case <-time.After(1 * time.Hour):
+						// actively self cleaning
+						connMapMutex.Lock()
+						delete(connMap, peer.Remote.String())
+						connMapMutex.Unlock()
+
 						PrintTee(peer.Logger, "Idle timeout. Stop echo routine for addr: %s\n", peer.Remote.String())
 						return
 					case msg := <-peer.Msg:
@@ -202,13 +238,15 @@ func (s *Server) Run() {
 							return
 						}
 						PrintTee(peer.Logger, "Received msg [%d] len [%d] from addr: %s\n", msg.Header.Index, len(msg.Packet), peer.Remote.String())
-						echoReply(peer, msg)
+						sendReply(peer, msg)
+
+						// Terminate further usage of msg object. This makes the garbage collector's life easier
+						msg.Header = nil
+						msg.Packet = nil
+						packetBuffers.Put(msg.Buffer)
 					}
 				}
 			}(peer)
-
-			peer.Msg <- msg
 		}
-
 	}
 }

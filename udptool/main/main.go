@@ -59,8 +59,8 @@ func main() {
 			input = inputC
 			if dataSize < 0 {
 				dataSize = 0
-			} else if dataSize > 4000 {
-				dataSize = 4000
+			} else if dataSize > utils.MaxPayloadSize {
+				dataSize = utils.MaxPayloadSize
 			}
 		} else {
 			mode = ServerMode

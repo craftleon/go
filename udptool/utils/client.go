@@ -16,14 +16,18 @@ type Client struct {
 }
 
 func (c *Client) Run() {
-	// pick a ephemeral local port
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
+	remoteAddr := &net.UDPAddr{
+		IP:   c.DestIp,
+		Port: c.DestPort,
+	}
+	// connect using ephemeral local address and port
+	conn, err := net.DialUDP("udp4", nil, remoteAddr)
 	if err != nil {
-		PrintTee(nil, "listen error %v\n", err)
+		PrintTee(nil, "dial error %v\n", err)
 		return
 	}
 
-	// retrieve port
+	// retrieve local port
 	laddr := conn.LocalAddr()
 	uaddr, err := net.ResolveUDPAddr(
 		laddr.Network(),
@@ -54,14 +58,10 @@ func (c *Client) Run() {
 
 	var index uint64
 	var currSendTime, currRecvTime int64
-	remoteAddr := &net.UDPAddr{
-		IP:   c.DestIp,
-		Port: c.DestPort,
-	}
 
 	sendMsg := func() error {
 		packet := MakePacket(index, uint16(c.DataSize))
-		_, err := conn.WriteToUDP(packet, remoteAddr)
+		_, err := conn.Write(packet)
 		if err != nil {
 			PrintTee(logger, "Send msg [%d] to addr: %s error: %v\n", index, remoteAddr.String(), err)
 			return err
@@ -74,8 +74,8 @@ func (c *Client) Run() {
 	}
 
 	recvEcho := func() {
-		var buf [MaxPacketSize]byte
-		n, remoteAddr, err := conn.ReadFromUDP(buf[:])
+		buf := make([]byte, HeaderLen+c.DataSize)
+		n, err := conn.Read(buf[:])
 		if err != nil {
 			PrintTee(logger, "Read from UDP error: %v\n", err)
 			return

@@ -22,7 +22,7 @@ type LogWriter struct {
 // async write
 func (l *LogWriter) Write(data []byte) (n int, err error) {
 	if l == nil {
-		return 0, errors.New("log logFileWriter is nil")
+		return 0, errors.New("LogWriter is nil")
 	}
 
 	if l.msg == nil {
@@ -65,7 +65,6 @@ func (l *LogWriter) writeRoutine() {
 
 		if len(msgArr) > 0 {
 			date := time.Now().Format("2006-01-02")
-			// O_CREATE create if does not exist，O_APPEND open at the end of file，O_SYNC sync data right into disk for writes
 			if len(l.Prefix) > 0 {
 				err := os.MkdirAll(l.Prefix, os.ModePerm)
 				if err != nil {
@@ -74,6 +73,9 @@ func (l *LogWriter) writeRoutine() {
 				}
 			}
 			path := fmt.Sprintf("%s%s-%s.log", l.Prefix, l.Name, date)
+			// O_CREATE: create file if it does not exist
+			// O_APPEND: open at the end of fil
+			// O_SYNC: sync data right into disk at write
 			file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE|os.O_SYNC, 0644)
 			if err != nil {
 				PrintTee(nil, "Log file not opened: %v", err)
@@ -105,4 +107,5 @@ func (l *LogWriter) Close() {
 	}
 	l.msg <- nil
 	l.wg.Wait()
+	close(l.msg)
 }
