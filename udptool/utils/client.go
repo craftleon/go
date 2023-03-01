@@ -10,17 +10,18 @@ import (
 )
 
 type Client struct {
-	DestIp   net.IP
-	DestPort int
-	DataSize int
+	DestIp       net.IP
+	DestPort     int
+	DataSize     int
+	SendInterval int
 }
 
 func (c *Client) Run() {
+	// connect using ephemeral local address and port
 	remoteAddr := &net.UDPAddr{
 		IP:   c.DestIp,
 		Port: c.DestPort,
 	}
-	// connect using ephemeral local address and port
 	conn, err := net.DialUDP("udp4", nil, remoteAddr)
 	if err != nil {
 		PrintTee(nil, "dial error %v\n", err)
@@ -43,7 +44,7 @@ func (c *Client) Run() {
 		Name: fmt.Sprintf("client-%s_%d", uaddr.IP.String(), uaddr.Port),
 	}
 	defer logger.Close()
-	PrintTee(logger, "Connection setup, addr: %s, port %d\n", uaddr.IP.String(), uaddr.Port)
+	PrintTee(logger, "Connection setup at addr: %s, port %d\n", uaddr.IP.String(), uaddr.Port)
 
 	stop := make(chan struct{})
 	term := make(chan os.Signal, 1)
@@ -106,7 +107,7 @@ func (c *Client) Run() {
 
 	for {
 		startTime := time.Now()
-		err = conn.SetDeadline(startTime.Add(2500 * time.Millisecond))
+		err = conn.SetDeadline(startTime.Add(time.Duration(c.SendInterval)*time.Second - 100*time.Millisecond))
 		if err != nil {
 			PrintTee(logger, "Set conn error: %v\n", err)
 			goto end
@@ -119,7 +120,7 @@ func (c *Client) Run() {
 	end:
 		endTime := time.Now()
 		select {
-		case <-time.After(3*time.Second - endTime.Sub(startTime)):
+		case <-time.After(time.Duration(c.SendInterval)*time.Second - endTime.Sub(startTime)):
 		case <-stop:
 			PrintTee(logger, "Program exited.\n")
 			return

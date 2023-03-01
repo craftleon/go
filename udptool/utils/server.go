@@ -7,13 +7,16 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
 
 const (
-	MsgQueueSize  = 64
-	MaxConnection = 1024
+	MsgQueueSize       = 64
+	MaxConnection      = 1024
+	RateReportInterval = 5
+	PeerTimeoutMinute  = 5
 )
 
 type Server struct {
@@ -80,6 +83,24 @@ func (s *Server) Run() {
 		conn.Close()
 	}()
 
+	// rate report routine
+	var sendByte, recvByte uint64
+	var sendRate, recvRate float64
+	go func() {
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(RateReportInterval * time.Second):
+				sendRate = float64(atomic.LoadUint64(&sendByte)) / (RateReportInterval * 1000) // kB/s
+				recvRate = float64(atomic.LoadUint64(&recvByte)) / (RateReportInterval * 1000) // kB/s
+				atomic.StoreUint64(&sendByte, 0)
+				atomic.StoreUint64(&recvByte, 0)
+				PrintTee(logger, "Average send %.2f kB/s, recv %.2f kB/s\n", sendRate, recvRate)
+			}
+		}
+	}()
+
 	sendReply := func(peer *Peer, msg *Message) {
 		err := conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
 		if err != nil {
@@ -87,13 +108,14 @@ func (s *Server) Run() {
 			return
 		}
 
-		_, err = conn.WriteToUDP(msg.Packet, peer.Remote)
+		n, err := conn.WriteToUDP(msg.Packet, peer.Remote)
 		if err != nil {
 			PrintTee(peer.Logger, "Send echo [%d] to addr: %s error: %v\n", msg.Header.Index, peer.Remote.String(), err)
 			return
 		}
 
-		PrintTee(peer.Logger, "Send echo [%d] len [%d] to addr: %s\n", msg.Header.Index, len(msg.Packet), peer.Remote.String())
+		atomic.AddUint64(&sendByte, uint64(n))
+		PrintTee(peer.Logger, "Send echo [%d] len [%d] to addr: %s\n", msg.Header.Index, n, peer.Remote.String())
 	}
 
 	pruneConnection := func(now int64) bool {
@@ -159,6 +181,8 @@ func (s *Server) Run() {
 			PrintTee(logger, "Read from UDP error: %v\n", err)
 			continue
 		}
+		atomic.AddUint64(&recvByte, uint64(n))
+
 		if n < HeaderLen {
 			packetBuffers.Put(buf)
 			PrintTee(logger, "UDP message format error\n")
@@ -224,17 +248,19 @@ func (s *Server) Run() {
 
 				for {
 					select {
-					case <-time.After(1 * time.Hour):
+					case <-time.After(PeerTimeoutMinute * time.Minute):
 						// actively self cleaning
 						connMapMutex.Lock()
 						delete(connMap, peer.Remote.String())
 						connMapMutex.Unlock()
 
-						PrintTee(peer.Logger, "Idle timeout. Stop echo routine for addr: %s\n", peer.Remote.String())
+						PrintTee(peer.Logger, "Idle timeout. Stop peer routine for addr: %s\n", peer.Remote.String())
+						PrintTee(logger, "Idle timeout. Connection removed from addr: %s\n", peer.Remote.String())
 						return
 					case msg := <-peer.Msg:
 						if msg == nil {
-							PrintTee(peer.Logger, "Stop echo routine for addr: %s\n", peer.Remote.String())
+							PrintTee(peer.Logger, "Stop peer routine for addr: %s\n", peer.Remote.String())
+							PrintTee(logger, "Connection removed from addr: %s\n", peer.Remote.String())
 							return
 						}
 						PrintTee(peer.Logger, "Received msg [%d] len [%d] from addr: %s\n", msg.Header.Index, len(msg.Packet), peer.Remote.String())

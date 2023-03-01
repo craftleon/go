@@ -13,10 +13,11 @@ const (
 )
 
 type LogWriter struct {
+	sync.Mutex
+	wg     sync.WaitGroup
 	Prefix string
 	Name   string
 	msg    chan []byte
-	wg     sync.WaitGroup
 }
 
 // async write
@@ -24,6 +25,9 @@ func (l *LogWriter) Write(data []byte) (n int, err error) {
 	if l == nil {
 		return 0, errors.New("LogWriter is nil")
 	}
+
+	l.Lock()
+	defer l.Unlock()
 
 	if l.msg == nil {
 		l.msg = make(chan []byte, LogQueueSize)
@@ -102,10 +106,14 @@ func (l *LogWriter) writeRoutine() {
 }
 
 func (l *LogWriter) Close() {
+	l.Lock()
+	defer l.Unlock()
+
 	if l.msg == nil {
 		return
 	}
 	l.msg <- nil
 	l.wg.Wait()
 	close(l.msg)
+	l.msg = nil
 }
