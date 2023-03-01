@@ -2,7 +2,6 @@ package utils
 
 import (
 	"fmt"
-	"math"
 	"net"
 	"os"
 	"os/signal"
@@ -16,7 +15,7 @@ const (
 	MsgQueueSize       = 64
 	MaxConnection      = 1024
 	RateReportInterval = 5
-	PeerTimeoutMinute  = 5
+	PeerTimeoutMinute  = 10
 )
 
 type Server struct {
@@ -118,35 +117,6 @@ func (s *Server) Run() {
 		PrintTee(peer.Logger, "Send echo [%d] len [%d] to addr: %s\n", msg.Header.Index, n, peer.Remote.String())
 	}
 
-	pruneConnection := func(now int64) bool {
-		connMapMutex.Lock()
-		defer connMapMutex.Unlock()
-
-		if len(connMap) < MaxConnection {
-			return true
-		}
-		// clean up outdated peer if max connection is reached
-		var oldest int64 = math.MaxInt64
-		var delAddr string
-		var delPeer *Peer
-		for addr, peer := range connMap {
-			if peer.LastReceivedTime < oldest {
-				oldest = peer.LastReceivedTime
-				delAddr = addr
-				delPeer = peer
-			}
-		}
-
-		if now-oldest > int64(300*time.Second) {
-			delete(connMap, delAddr)
-			delPeer.Msg <- nil
-			PrintTee(logger, "Reached maximum connection. Remove outdated connection from addr: %s\n", delAddr)
-			return true
-		}
-
-		return false
-	}
-
 	// transmission start
 	var wg sync.WaitGroup
 
@@ -213,12 +183,15 @@ func (s *Server) Run() {
 			peer.LastReceivedTime = recvTime
 			peer.Msg <- msg
 		} else {
-			// clean old connection and create new connection
-			if !pruneConnection(recvTime) {
+			// create new connection if there is room
+			connMapMutex.Lock()
+			if len(connMap) >= MaxConnection {
+				connMapMutex.Unlock()
 				packetBuffers.Put(buf)
 				PrintTee(logger, "Reached maximum connection. Discard new msg [%d] from addr: %s\n", msg.Header.Index, remoteAddr.String())
 				continue
 			}
+			connMapMutex.Unlock()
 
 			// setup new routine for connection
 			peer = &Peer{
