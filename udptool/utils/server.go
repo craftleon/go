@@ -1,6 +1,7 @@
 package utils
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -30,6 +31,7 @@ type Message struct {
 }
 
 type Peer struct {
+	Conn             net.Conn
 	Remote           *net.UDPAddr
 	Logger           *LogWriter
 	Msg              chan *Message
@@ -37,14 +39,26 @@ type Peer struct {
 }
 
 func (s *Server) Run() {
-	conn, err := net.ListenUDP("udp4", &net.UDPAddr{
+	lc := &net.ListenConfig{
+		Control: SetSocketReusePort,
+	}
+	tlAddr := &net.UDPAddr{
 		IP:   s.BindIp,
 		Port: s.BindPort,
-	})
+	}
+	pConn, err := lc.ListenPacket(context.Background(), "udp4", tlAddr.String())
+
+	/*
+		conn, err := net.ListenUDP("udp4", &net.UDPAddr{
+			IP:   s.BindIp,
+			Port: s.BindPort,
+		})
+	*/
 	if err != nil {
 		PrintTee(nil, "listen error %v\n", err)
 		return
 	}
+	conn := pConn.(*net.UDPConn)
 
 	connMap := make(map[string]*Peer)
 	var connMapMutex sync.Mutex
@@ -100,23 +114,6 @@ func (s *Server) Run() {
 		}
 	}()
 
-	sendReply := func(peer *Peer, msg *Message) {
-		err := conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
-		if err != nil {
-			PrintTee(peer.Logger, "Send error: %v\n", err)
-			return
-		}
-
-		n, err := conn.WriteToUDP(msg.Packet, peer.Remote)
-		if err != nil {
-			PrintTee(peer.Logger, "Send echo [%d] to addr: %s error: %v\n", msg.Header.Index, peer.Remote.String(), err)
-			return
-		}
-
-		atomic.AddUint64(&sendByte, uint64(n))
-		PrintTee(peer.Logger, "Send echo [%d] len [%d] to addr: %s\n", msg.Header.Index, n, peer.Remote.String())
-	}
-
 	// transmission start
 	var wg sync.WaitGroup
 
@@ -148,14 +145,15 @@ func (s *Server) Run() {
 		n, remoteAddr, err := conn.ReadFromUDP(buf[:])
 		if err != nil {
 			packetBuffers.Put(buf)
-			PrintTee(logger, "Read from UDP error: %v\n", err)
+			PrintTee(logger, "Listen socket read from UDP error: %v\n", err)
 			continue
 		}
+
 		atomic.AddUint64(&recvByte, uint64(n))
 
 		if n < HeaderLen {
 			packetBuffers.Put(buf)
-			PrintTee(logger, "UDP message format error\n")
+			PrintTee(logger, "Listen socket UDP message format error\n")
 			continue
 		}
 
@@ -163,9 +161,10 @@ func (s *Server) Run() {
 		header, err := CheckPacket(packet)
 		if err != nil {
 			packetBuffers.Put(buf)
-			PrintTee(logger, "UDP data packet error: %v\n", err)
+			PrintTee(logger, "Listen socket UDP data packet error: %v\n", err)
 			continue
 		}
+		PrintTee(logger, "Listen socket received msg [%d] len [%d] from addr: %s\n", header.Index, n, remoteAddr.String())
 
 		recvTime := time.Now().UnixNano()
 		msg := &Message{
@@ -187,14 +186,31 @@ func (s *Server) Run() {
 			connMapMutex.Lock()
 			if len(connMap) >= MaxConnection {
 				connMapMutex.Unlock()
-				packetBuffers.Put(buf)
+				packetBuffers.Put(msg.Buffer)
+				msg.Header = nil
+				msg.Packet = nil
+				msg.Buffer = nil
 				PrintTee(logger, "Reached maximum connection. Discard new msg [%d] from addr: %s\n", msg.Header.Index, remoteAddr.String())
 				continue
 			}
 			connMapMutex.Unlock()
 
 			// setup new routine for connection
+			dialer := &net.Dialer{
+				LocalAddr: laddr,
+				Control:   SetSocketReusePort,
+			}
+			peerConn, err := dialer.Dial("udp4", remoteAddr.String())
+			if err != nil {
+				packetBuffers.Put(msg.Buffer)
+				msg.Header = nil
+				msg.Packet = nil
+				msg.Buffer = nil
+				PrintTee(logger, "Peer socket cannot connect to addr: %s, error:%v\n", remoteAddr.String(), err)
+				continue
+			}
 			peer = &Peer{
+				Conn:   peerConn,
 				Remote: remoteAddr,
 				Logger: &LogWriter{
 					Prefix: "peer/",
@@ -208,14 +224,55 @@ func (s *Server) Run() {
 			connMapMutex.Unlock()
 			peer.Msg <- msg
 
-			PrintTee(logger, "Setup new connection from addr: %s\n", remoteAddr.String())
+			PrintTee(logger, "Setup new peer connection from addr: %s\n", remoteAddr.String())
 
-			// peer echo routine
-			wg.Add(1)
+			wg.Add(2)
+			// peer recevie routine
+			go func(peer *Peer) {
+				defer wg.Done()
+				for {
+					peerBuf := packetBuffers.Get()
+					n, err := peer.Conn.Read(peerBuf[:])
+					if err != nil {
+						packetBuffers.Put(peerBuf)
+						PrintTee(peer.Logger, "Peer socket read from UDP error: %v\n", err)
+						return
+					}
+
+					atomic.AddUint64(&recvByte, uint64(n))
+
+					if n < HeaderLen {
+						packetBuffers.Put(peerBuf)
+						PrintTee(peer.Logger, "Peer socket UDP message format error\n")
+						continue
+					}
+
+					packet := peerBuf[:n]
+					header, err := CheckPacket(packet)
+					if err != nil {
+						packetBuffers.Put(peerBuf)
+						PrintTee(peer.Logger, "Peer socket UDP data packet error: %v\n", err)
+						continue
+					}
+					PrintTee(peer.Logger, "Peer socket received msg [%d] len [%d] from addr: %s\n", header.Index, n, peer.Remote.String())
+
+					recvTime := time.Now().UnixNano()
+					msg := &Message{
+						Header: header,
+						Buffer: peerBuf,
+						Packet: packet,
+					}
+					peer.LastReceivedTime = recvTime
+					peer.Msg <- msg
+				}
+			}(peer)
+
+			// peer working routine
 			go func(peer *Peer) {
 				defer wg.Done()
 				defer peer.Logger.Close()
 				defer close(peer.Msg)
+				defer peer.Conn.Close()
 
 				PrintTee(peer.Logger, "New peer created for connection from addr: %s\n", peer.Remote.String())
 
@@ -237,15 +294,36 @@ func (s *Server) Run() {
 							return
 						}
 						PrintTee(peer.Logger, "Received msg [%d] len [%d] from addr: %s\n", msg.Header.Index, len(msg.Packet), peer.Remote.String())
-						sendReply(peer, msg)
+						err := peer.sendReply(msg)
+						if err == nil {
+							atomic.AddUint64(&sendByte, uint64(len(msg.Packet)))
+						}
 
-						// Terminate further usage of msg object. This makes the garbage collector's life easier
+						packetBuffers.Put(msg.Buffer)
 						msg.Header = nil
 						msg.Packet = nil
-						packetBuffers.Put(msg.Buffer)
+						msg.Buffer = nil
 					}
 				}
 			}(peer)
 		}
 	}
+}
+
+func (peer *Peer) sendReply(msg *Message) error {
+	err := peer.Conn.SetWriteDeadline(time.Now().Add(1 * time.Second))
+	if err != nil {
+		PrintTee(peer.Logger, "Send error: %v\n", err)
+		return err
+	}
+
+	n, err := peer.Conn.Write(msg.Packet)
+	if err != nil {
+		PrintTee(peer.Logger, "Send echo [%d] to addr: %s error: %v\n", msg.Header.Index, peer.Remote.String(), err)
+		return err
+	}
+
+	PrintTee(peer.Logger, "Send echo [%d] len [%d] to addr: %s\n", msg.Header.Index, n, peer.Remote.String())
+
+	return nil
 }
