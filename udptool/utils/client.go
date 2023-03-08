@@ -41,7 +41,8 @@ func (c *Client) Run() {
 
 	// init log
 	logger := &LogWriter{
-		Name: fmt.Sprintf("client-%s_%d", uaddr.IP.String(), uaddr.Port),
+		Prefix: "client/",
+		Name:   fmt.Sprintf("client-%s_%d", uaddr.IP.String(), uaddr.Port),
 	}
 	defer logger.Close()
 	PrintTee(logger, "Connection setup at addr: %s, port %d\n", uaddr.IP.String(), uaddr.Port)
@@ -105,6 +106,9 @@ func (c *Client) Run() {
 		PrintTee(logger, "Received echo [%d] len [%d] from addr: %s, interval: %s\n", header.Index, n, remoteAddr.String(), durationStr)
 	}
 
+	ticker := time.NewTicker(time.Duration(c.SendInterval) * time.Second)
+	defer ticker.Stop()
+
 	for {
 		startTime := time.Now()
 		err = conn.SetDeadline(startTime.Add(time.Duration(c.SendInterval)*time.Second - 100*time.Millisecond))
@@ -118,9 +122,8 @@ func (c *Client) Run() {
 		}
 
 	end:
-		endTime := time.Now()
 		select {
-		case <-time.After(time.Duration(c.SendInterval)*time.Second - endTime.Sub(startTime)):
+		case <-ticker.C:
 		case <-stop:
 			PrintTee(logger, "Program exited.\n")
 			return

@@ -62,7 +62,8 @@ func (s *Server) Run() {
 
 	// init log
 	logger := &LogWriter{
-		Name: fmt.Sprintf("server-%s_%d", uaddr.IP.String(), uaddr.Port),
+		Prefix: "server/",
+		Name:   fmt.Sprintf("server-%s_%d", uaddr.IP.String(), uaddr.Port),
 	}
 	defer logger.Close()
 	PrintTee(logger, "Listen successful, addr: %s, port %d\n", uaddr.IP.String(), uaddr.Port)
